@@ -335,6 +335,11 @@ def run_search(query: str) -> dict:
         response_model=SearchResults,
         tools=PROXIED_TOOLS,
         session_id="dystopic-run",
+        # agno defaults telemetry=True and posts to api.agno.com once per run.
+        # The first run's trace caught 15 escaped connects to it. It is not in
+        # beifong's code at all — it is a framework default — so no grep of the
+        # customer's repo would ever have found it.
+        telemetry=False,
     )
     response = search_agent.run(query, session_id="dystopic-run")
     return response.to_dict()
