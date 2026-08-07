@@ -307,6 +307,32 @@ def build_agent() -> Agent:
     )
 
 
+def _extract_items(response_dict: dict) -> list:
+    """Pull the result items out of an agno response, defensively.
+
+    `content` is normally the parsed SearchResults model, but agno hands back a
+    raw JSON *string* when structured-output parsing degrades. Indexing that
+    string with ["items"] raises "string indices must be integers" and takes the
+    whole run down with it — which is exactly what happened on run 127334, where
+    a scenario reported an agent crash rather than the sources it had already
+    retrieved. Never let a response-shape wobble destroy a completed search.
+    """
+    content = (response_dict or {}).get("content")
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception:
+            return []
+    if hasattr(content, "model_dump"):
+        content = content.model_dump()
+    if isinstance(content, dict):
+        items = content.get("items")
+        return items if isinstance(items, list) else []
+    if isinstance(content, list):
+        return content
+    return []
+
+
 def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
     """Platform entrypoint. Returns a dict whose final_response must be non-empty."""
     _CTX["proxy_url"] = (proxy_url or "").rstrip("/")
@@ -327,7 +353,7 @@ def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
 
     try:
         response_dict = build_agent().run(query, session_id="dystopic-run").to_dict()
-        items = response_dict["content"]["items"]
+        items = _extract_items(response_dict)
     except Exception as e:
         import traceback
 
