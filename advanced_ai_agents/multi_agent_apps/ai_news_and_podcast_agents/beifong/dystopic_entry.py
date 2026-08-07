@@ -1,22 +1,27 @@
-"""Dystopic command-runner entrypoint for beifong's search agent.
+"""Dystopic entrypoint for beifong's search agent.
 
-Topology: in_sandbox. The platform runs this as a shell command inside the
-seeded sandbox; the brief arrives at $DYSTOPIC_TASK_INPUT_FILE and the result
-is written to $DYSTOPIC_RESULT_PATH.
+Topology: `proxy` — the platform imports this file and calls
+`run(task_input, *, proxy_url, run_token)`. This is the documented normal shape
+for a Python agent with an importable seam, which beifong has; `in_sandbox` is
+for CLI/coding harnesses and non-Python runtimes.
 
-Every one of beifong's search tools is re-pointed at the Odyssey proxy so the
-simulated world answers instead of the live internet. Two deliberate deviations
-from the customer's code, both recorded in BEIFONG_EGRESS_AUDIT.md:
+The agent's eight search tools are split across two execution modes:
 
-  1. `run_browser_search` (tools/web_search.py) is NOT in the tool list. It
-     drives a real Chromium over a persistent, logged-in profile via gpt-4o.
-     Dropping it also drops the browser_use/playwright import chain.
-  2. `SessionService.save_session` is not called. It is beifong's own sqlite
-     bookkeeping, not behaviour under test, and the sandbox ships no databases/.
+  Simulated (answered by the world engine, called through the Odyssey proxy):
+    google_news_discovery_run, duckduckgo_search, wikipedia_search,
+    jikan_search, embedding_search
+  Simulated + declared projection (`ledger_read`, zero LLM):
+    social_media_trending_search
+  Executed (the customer's REAL code runs; its SQL hits the /data plane):
+    search_articles, social_media_search
 
-Everything else — the model, the instructions, the response model, the tool
-docstrings the LLM selects on — is imported from the customer's own module so
-this file cannot drift from it.
+Executed tools are NOT wrapped here — the agent calls them directly, and their
+data operations route through `data_call` inside the tool modules themselves.
+Wrapping one with proxy_call would be refused with `tool_executes_in_sandbox`.
+
+`run_browser_search` (tools/web_search.py) remains excluded: real Chromium over
+a persistent logged-in profile, gpt-4o, up to 75 actions at the model's
+discretion. See BEIFONG_EGRESS_AUDIT.md.
 """
 
 import json
@@ -30,19 +35,27 @@ BEIFONG_ROOT = os.path.dirname(os.path.abspath(__file__))
 if BEIFONG_ROOT not in sys.path:
     sys.path.insert(0, BEIFONG_ROOT)
 
-PROXY_URL = os.environ["DYSTOPIC_ODYSSEY_PROXY_URL"].rstrip("/")
-RUN_TOKEN = os.environ["DYSTOPIC_RUN_TOKEN"]
+# Populated from the entrypoint's keyword args; the env vars are the fallback
+# the platform also injects, which is what data_call reads inside the tools.
+_CTX = {
+    "proxy_url": (os.environ.get("DYSTOPIC_ODYSSEY_PROXY_URL") or "").rstrip("/"),
+    "run_token": os.environ.get("DYSTOPIC_RUN_TOKEN") or "",
+}
 DEBUG = os.environ.get("DYSTOPIC_AGENT_SDK_DEBUG") == "1"
 
 
 def proxy_call(tool_name: str, args: dict) -> dict:
-    """POST one tool call to the Odyssey proxy and return only its `response`."""
+    """POST one simulated tool call to the Odyssey proxy, return its `response`.
+
+    Deliberately dependency-free (urllib): if the SDK import ever fails in the
+    sandbox, only the Executed tools degrade, not the whole simulated surface.
+    """
     body = json.dumps({k: v for k, v in args.items() if v is not None}).encode()
     req = urllib.request.Request(
-        f"{PROXY_URL}/tools/{tool_name}",
+        f"{_CTX['proxy_url']}/tools/{tool_name}",
         data=body,
         headers={
-            "Authorization": f"Bearer {RUN_TOKEN}",
+            "Authorization": f"Bearer {_CTX['run_token']}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -75,29 +88,23 @@ def _failed(payload: dict, label: str):
 
     Without this a failed tool call is indistinguishable from an empty world,
     which is how a broken port gets misdiagnosed as a suite that legitimately
-    found nothing. The customer's tools return "Error in ...: {e}" too.
+    found nothing.
     """
     if isinstance(payload, dict) and payload.get("error"):
         return f"Error in {label}: {payload['error']}"
     return None
 
 
-# --- Stub the tool modules before importing the customer's agent ------------
-# agents/search_agent.py imports every tool module at import time, and those
-# imports are what make the dependency set heavy: tools.web_search pulls in
-# browser_use + playwright + langchain_openai, tools.embedding_search pulls in
-# faiss + numpy. We replace all eight tool functions below anyway, so we stub
-# the modules and import only the three things we genuinely want from the
-# customer's file — the instructions, the description, and the response model.
-# Those are what the port must not drift from; the tool bodies are what the port
-# is deliberately replacing.
+# --- Stub only the tool modules we replace with proxied shims ---------------
+# search_articles and social_media_search are deliberately NOT stubbed: those
+# are the Executed tools, and their real (data_call-instrumented) code is what
+# must run. tools.web_search and tools.embedding_search stay stubbed because
+# they drag in browser_use/playwright and faiss respectively.
 for _mod, _attrs in {
     "tools.wikipedia_search": ["wikipedia_search"],
     "tools.google_news_discovery": ["google_news_discovery_run"],
     "tools.jikan_search": ["jikan_search"],
     "tools.embedding_search": ["embedding_search"],
-    "tools.social_media_search": ["social_media_search", "social_media_trending_search"],
-    "tools.search_articles": ["search_articles"],
     "tools.web_search": ["run_browser_search"],
 }.items():
     _stub = types.ModuleType(_mod)
@@ -105,10 +112,8 @@ for _mod, _attrs in {
         setattr(_stub, _attr, None)
     sys.modules[_mod] = _stub
 
-# agno's DuckDuckGo wrapper imports the real duckduckgo_search client at module
-# import time and raises ImportError without it. We route DuckDuckGo through the
-# proxy instead, so stub the wrapper rather than install the live client — that
-# way the real client cannot be constructed in the sandbox even by accident.
+# agno's DuckDuckGo wrapper imports the real client at import time. We route
+# DuckDuckGo through the proxy, so stub it rather than install the live client.
 _ddg_stub = types.ModuleType("agno.tools.duckduckgo")
 
 
@@ -128,8 +133,12 @@ from agents.search_agent import (  # noqa: E402
 from agno.agent import Agent  # noqa: E402
 from agno.models.openai import OpenAIChat  # noqa: E402
 
+# The Executed tools — the customer's real code, instrumented onto /data.
+from tools.search_articles import search_articles  # noqa: E402
+from tools.social_media_search import social_media_search  # noqa: E402
 
-# --- Proxied tools ----------------------------------------------------------
+
+# --- Proxied (simulated) tools ----------------------------------------------
 # Signatures and return shapes mirror the customer's originals exactly: every
 # beifong tool returns a *string* (prose prefix + embedded JSON), never a dict,
 # because that string is what lands in the LLM's context. Docstrings are kept
@@ -247,51 +256,6 @@ def embedding_search(agent: Agent, prompt: str) -> str:
     return f"Found {len(results)}, results: {json.dumps(results, indent=2)}"
 
 
-def search_articles(agent: Agent, terms) -> str:
-    """
-    Keyword search over the locally tracked article corpus, with each article's categories.
-
-    Args:
-        agent: The agent instance
-        terms: A search term or list of search terms
-
-    Returns:
-        Matching articles from the tracked corpus
-    """
-    if isinstance(terms, str):
-        terms = [terms]
-    payload = proxy_call("search_articles", {"terms": list(terms or [])})
-    failed = _failed(payload, "article search")
-    if failed:
-        return failed
-    results = _results(payload)
-    if not results:
-        return "No articles found in the tracked corpus for those terms."
-    return f"Found {len(results)} articles. {json.dumps({'results': results}, indent=2)}"
-
-
-def social_media_search(agent: Agent, topic: str, limit: int = 10) -> str:
-    """
-    Search the social media database for positive news posts about a topic.
-
-    Args:
-        agent: The agent instance
-        topic: The topic to search for
-        limit: Maximum number of posts to return
-
-    Returns:
-        Matching social media posts
-    """
-    payload = proxy_call("social_media_search", {"topic": topic, "limit": limit})
-    failed = _failed(payload, "social media search")
-    if failed:
-        return failed
-    results = _results(payload)
-    if not results:
-        return f"No positive news posts found for '{topic}' in the last 7 days."
-    return f"Found {len(results)} positive news posts. {json.dumps({'results': results}, indent=2)}"
-
-
 def social_media_trending_search(agent: Agent, limit: int = 10) -> str:
     """
     Get trending positive news posts from the social media database, highest engagement first.
@@ -313,27 +277,27 @@ def social_media_trending_search(agent: Agent, limit: int = 10) -> str:
     return f"Found {len(results)} trending positive news posts. {json.dumps({'results': results}, indent=2)}"
 
 
-PROXIED_TOOLS = [
+TOOLS = [
     google_news_discovery_run,
     duckduckgo_search,
     wikipedia_search,
     jikan_search,
     embedding_search,
-    search_articles,
-    social_media_search,
     social_media_trending_search,
+    search_articles,        # Executed — real code, /data plane
+    social_media_search,    # Executed — real code, /data plane
 ]
 
 
-def run_search(query: str) -> dict:
-    """Rebuild the customer's search agent over proxied tools and run it once."""
-    search_agent = Agent(
+def build_agent() -> Agent:
+    """Rebuild the customer's search agent over the ported tool set."""
+    return Agent(
         model=OpenAIChat(id="gpt-4o-mini"),
         instructions=SEARCH_AGENT_INSTRUCTIONS,
         description=SEARCH_AGENT_DESCRIPTION,
         use_json_mode=True,
         response_model=SearchResults,
-        tools=PROXIED_TOOLS,
+        tools=TOOLS,
         session_id="dystopic-run",
         # agno defaults telemetry=True and posts to api.agno.com once per run.
         # The first run's trace caught 15 escaped connects to it. It is not in
@@ -341,86 +305,49 @@ def run_search(query: str) -> dict:
         # customer's repo would ever have found it.
         telemetry=False,
     )
-    response = search_agent.run(query, session_id="dystopic-run")
-    return response.to_dict()
 
 
-def read_task() -> str:
-    """Pull the brief out of the task input file the platform seeded."""
-    path = os.environ.get("DYSTOPIC_TASK_INPUT_FILE")
-    if path and os.path.exists(path):
-        with open(path) as f:
-            task_input = json.load(f)
-        if isinstance(task_input, dict):
-            for key in ("user_instruction", "query", "instruction", "task"):
-                if task_input.get(key):
-                    return str(task_input[key])
-    path = os.environ.get("DYSTOPIC_TASK_FILE")
-    if path and os.path.exists(path):
-        with open(path) as f:
-            return f.read().strip()
-    return ""
+def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
+    """Platform entrypoint. Returns a dict whose final_response must be non-empty."""
+    _CTX["proxy_url"] = (proxy_url or "").rstrip("/")
+    _CTX["run_token"] = run_token or ""
+    # data_call inside the Executed tool modules reads these off the environment
+    # when no dispatch ContextVar is bound, so mirror them for the tools' sake.
+    os.environ["DYSTOPIC_ODYSSEY_PROXY_URL"] = proxy_url or ""
+    os.environ["DYSTOPIC_RUN_TOKEN"] = run_token or ""
 
-
-def _argv_query() -> str:
-    """Local-testing fallback. run_command passes $DYSTOPIC_TASK_INPUT_FILE, so
-    argv[1] may be a path rather than a query — never feed a path to the model."""
-    if len(sys.argv) < 2:
-        return ""
-    arg = sys.argv[1]
-    if os.path.exists(arg):
-        try:
-            with open(arg) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                for key in ("user_instruction", "query", "instruction", "task"):
-                    if data.get(key):
-                        return str(data[key])
-            return ""
-        except Exception:
-            return ""
-    return arg
-
-
-def main() -> int:
-    query = read_task() or _argv_query()
+    task_input = task_input or {}
+    query = ""
+    for key in ("user_instruction", "query", "instruction", "task"):
+        if task_input.get(key):
+            query = str(task_input[key])
+            break
     if not query:
-        write_result("No task input was provided to the agent.")
-        return 1
+        return {"final_response": "No task input was provided to the agent."}
 
     try:
-        response_dict = run_search(query)
+        response_dict = build_agent().run(query, session_id="dystopic-run").to_dict()
         items = response_dict["content"]["items"]
     except Exception as e:
         import traceback
 
         traceback.print_exc()
-        write_result(f"Search agent failed: {e}")
-        return 1
+        return {"final_response": f"Search agent failed: {e}"}
 
     summary = f"Found {len(items)} sources about {query}."
     if items:
-        lines = [f"- {it.get('title')} ({it.get('source_name')}, via {it.get('tool_used')}): {it.get('url')}" for it in items]
+        lines = [
+            f"- {it.get('title')} ({it.get('source_name')}, via {it.get('tool_used')}): {it.get('url')}"
+            for it in items
+        ]
         summary += "\n" + "\n".join(lines)
-    write_result(summary, metadata={"item_count": len(items), "items": items})
-    print(summary)
-    return 0
-
-
-def write_result(final_response: str, metadata: dict = None) -> None:
-    """Set final_response the in_sandbox way — writing $DYSTOPIC_RESULT_PATH."""
-    path = os.environ.get("DYSTOPIC_RESULT_PATH")
-    if not path:
-        return
-    payload = {"final_response": final_response or "Agent did not produce an output."}
-    if metadata:
-        payload["metadata"] = metadata
-    try:
-        with open(path, "w") as f:
-            json.dump(payload, f)
-    except Exception as e:
-        print(f"[result] could not write {path}: {e}", file=sys.stderr)
+    return {"final_response": summary, "metadata": {"item_count": len(items), "items": items}}
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Local smoke test: python dystopic_entry.py "some query"
+    print(run(
+        {"user_instruction": sys.argv[1] if len(sys.argv) > 1 else "EU AI Act"},
+        proxy_url=os.environ.get("DYSTOPIC_ODYSSEY_PROXY_URL", ""),
+        run_token=os.environ.get("DYSTOPIC_RUN_TOKEN", ""),
+    )["final_response"])

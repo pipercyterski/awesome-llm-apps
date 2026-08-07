@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from agno.agent import Agent
 from db.config import get_db_path
+from dystopic.odyssey import data_call
 
 
 @contextmanager
@@ -34,28 +35,34 @@ def social_media_search(agent: Agent, topic: str, limit: int = 10) -> str:
     try:
         days_back: int = 7
         date_from = (datetime.now() - timedelta(days=days_back)).isoformat()
-        with get_social_media_db() as conn:
-            cursor = conn.cursor()
-            sql_query = """
-            SELECT 
+        # Ported for Dystopic: declared `executed`, so the query below runs
+        # against the run's ledger-backed world via the /data plane instead of
+        # the local social_media_db. The SQL is the customer's, unchanged in
+        # shape — only the transport and the parameter binding differ, because
+        # the plane canonicalizes literals out of the operation text itself.
+        if True:
+            safe_topic = str(topic).replace("'", "''")
+            search_term = f"'%{safe_topic}%'"
+            sql_query = f"""
+            SELECT
                 post_id,
                 user_display_name,
                 post_timestamp,
                 post_url,
                 post_text,
                 platform
-            FROM posts 
-            WHERE 
-                categories LIKE '%"news"%' 
+            FROM posts
+            WHERE
+                categories LIKE '%"news"%'
                 AND sentiment = 'positive'
-                AND datetime(post_timestamp) >= datetime(?)
-                AND (post_text LIKE ? OR user_display_name LIKE ?)
+                AND datetime(post_timestamp) >= datetime('{date_from}')
+                AND (post_text LIKE {search_term} OR user_display_name LIKE {search_term})
             ORDER BY datetime(post_timestamp) DESC
-            LIMIT ?
+            LIMIT {int(limit)}
             """
-            search_term = f"%{topic}%"
-            cursor.execute(sql_query, (date_from, search_term, search_term, limit))
-            rows = cursor.fetchall()
+            result = data_call("social_media_search", kind="sql", intent="read",
+                               operation=sql_query, client="sqlite")
+            rows = list(result.get("rows") or [])
             if not rows:
                 return f"No positive news posts found for '{topic}' in the last {days_back} days."
             results = []
@@ -64,7 +71,7 @@ def social_media_search(agent: Agent, topic: str, limit: int = 10) -> str:
                     "id": f"social_{row['post_id']}",
                     "url": row["post_url"] or f"https://{row['platform']}/post/{row['post_id']}",
                     "published_date": row["post_timestamp"],
-                    "description": row["post_text"][:200] + "..." if len(row["post_text"]) > 200 else row["post_text"],
+                    "description": str(row.get("post_text") or "")[:200] + "..." if len(str(row.get("post_text") or "")) > 200 else str(row.get("post_text") or ""),
                     "source_id": "social_media_db",
                     "source_name": f"{row['platform'].title()}",
                     "categories": ["news"],
