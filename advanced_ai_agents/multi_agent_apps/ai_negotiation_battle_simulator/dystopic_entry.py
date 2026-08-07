@@ -109,7 +109,12 @@ def seller_respond(action: str, counter_amount: int = 0, message: str = "",
 
 
 def get_negotiation_state() -> dict:
-    """Read the current negotiation's status, round, and latest offer."""
+    """Read negotiations from the world, with each one's economic bounds.
+
+    Answered by a declared ledger_read projection, so the response is computed
+    from the ledger rather than generated: the nested `scenario` object carries
+    the authoritative buyer_budget and seller_minimum.
+    """
     return proxy_call("get_negotiation_state", {})
 
 
