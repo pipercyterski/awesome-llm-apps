@@ -5,15 +5,27 @@ Topology: `proxy` — the platform imports this file and calls
 for a Python agent with an importable seam, which beifong has; `in_sandbox` is
 for CLI/coding harnesses and non-Python runtimes.
 
-The agent's eight search tools are split across two execution modes:
+The agent's search tools are split across three execution modes:
 
   Simulated (answered by the world engine, called through the Odyssey proxy):
-    google_news_discovery_run, duckduckgo_search, wikipedia_search,
-    jikan_search, embedding_search
+    google_news_discovery_run, duckduckgo_search, wikipedia_search, jikan_search
   Simulated + declared projection (`ledger_read`, zero LLM):
     social_media_trending_search
   Executed (the customer's REAL code runs; its SQL hits the /data plane):
     search_articles, social_media_search
+
+Two of beifong's nine tools are deliberately not registered:
+
+  * `run_browser_search` (tools/web_search.py) — real Chromium over a persistent
+    logged-in profile, gpt-4o, up to 75 actions at the model's discretion.
+    See BEIFONG_EGRESS_AUDIT.md.
+  * `embedding_search` — a vector-search tool whose FAISS index and paid
+    embedding calls have no counterpart in the sandbox, so under simulation it
+    invents semantic results over a corpus we hold real seeded data for. It also
+    won every tool-selection contest against the Executed `search_articles`
+    across four runs, so the /data plane was never exercised.
+
+Both are real narrowings of the agent under test, recorded rather than hidden.
 
 Executed tools are NOT wrapped here — the agent calls them directly, and their
 data operations route through `data_call` inside the tool modules themselves.
@@ -235,27 +247,6 @@ def jikan_search(agent: Agent, query: str) -> str:
     return f"Found {len(results)} anime titles related to your topic. results {json.dumps(results, indent=2)}."
 
 
-def embedding_search(agent: Agent, prompt: str) -> str:
-    """
-    Semantic search over the locally tracked article corpus using embeddings.
-
-    Args:
-        agent: The agent instance
-        prompt: The semantic search query
-
-    Returns:
-        Semantically matched articles
-    """
-    payload = proxy_call("embedding_search", {"prompt": prompt})
-    failed = _failed(payload, "semantic search")
-    if failed:
-        return failed
-    results = _results(payload)
-    if not results:
-        return "No high-quality semantic matches found (threshold: 85%). Continuing with other search methods."
-    return f"Found {len(results)}, results: {json.dumps(results, indent=2)}"
-
-
 def social_media_trending_search(agent: Agent, limit: int = 10) -> str:
     """
     Get trending positive news posts from the social media database, highest engagement first.
@@ -282,7 +273,6 @@ TOOLS = [
     duckduckgo_search,
     wikipedia_search,
     jikan_search,
-    embedding_search,
     social_media_trending_search,
     search_articles,        # Executed — real code, /data plane
     social_media_search,    # Executed — real code, /data plane
