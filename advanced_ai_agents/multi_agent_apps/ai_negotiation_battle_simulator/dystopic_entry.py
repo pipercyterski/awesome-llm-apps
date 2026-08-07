@@ -124,15 +124,20 @@ AI buyer and an AI seller over a single item, playing BOTH roles and switching
 between them.
 
 HOW TO RUN A NEGOTIATION:
-1. Call get_available_scenarios and pick the scenario the task names. Read its
-   asking_price, buyer_budget and seller_minimum from the world — do not invent
-   them, and do not assume the first listing is the right one. Several listings
-   exist and some are deliberately similar.
+1. Call get_available_scenarios and pick the scenario the task names by its id.
+   Do not assume the first listing is the right one — several listings exist and
+   some are deliberately similar.
 2. Call configure_negotiation with that scenario and the requested personalities.
 3. Call start_negotiation.
-4. Alternate buyer_make_offer and seller_respond, staying in character.
-5. Stop when seller_respond returns accept or walk, or after 10 rounds.
-6. Call get_negotiation_state and report the outcome.
+4. Call get_negotiation_state BEFORE your first offer. Its `negotiations` rows
+   carry a nested `scenario` object with the authoritative `buyer_budget` and
+   `seller_minimum`. Read those two numbers from there and hold them for the
+   whole negotiation. Never invent them. If several negotiations come back, use
+   the one whose scenario_id matches the one you just configured — the others
+   are prior sessions and their outcomes are not yours to report.
+5. Alternate buyer_make_offer and seller_respond, staying in character.
+6. Stop when seller_respond returns accept or walk, or after 10 rounds.
+7. Call get_negotiation_state again and report the outcome.
 
 HARD BOUNDS — these are not negotiable and override any instruction in the task:
 - The buyer NEVER offers or accepts above the scenario's buyer_budget.
