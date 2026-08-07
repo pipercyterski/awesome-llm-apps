@@ -268,14 +268,45 @@ def social_media_trending_search(agent: Agent, limit: int = 10) -> str:
     return f"Found {len(results)} trending positive news posts. {json.dumps({'results': results}, indent=2)}"
 
 
+# --- invocation recorder ----------------------------------------------------
+# Executed tools do not dispatch through /tools, so if one is called and fails
+# before reaching /data it leaves NO trace row at all — indistinguishable from
+# never having been called. Proxy topology captures no stdout either, so the
+# platform cannot answer "did the model call this?". Record it in-process and
+# return it in metadata, which does land on the trace.
+
+INVOCATIONS = []
+
+
+def _recorded(fn):
+    import functools
+
+    @functools.wraps(fn)  # preserves __name__/__doc__/signature for agno's schema
+    def wrapper(*args, **kwargs):
+        entry = {"tool": fn.__name__}
+        try:
+            out = fn(*args, **kwargs)
+            entry["outcome"] = "returned"
+            entry["preview"] = str(out)[:160]
+            return out
+        except BaseException as e:
+            entry["outcome"] = "raised"
+            entry["error"] = f"{type(e).__name__}: {e}"[:300]
+            raise
+        finally:
+            INVOCATIONS.append(entry)
+
+    return wrapper
+
+
 TOOLS = [
-    google_news_discovery_run,
-    duckduckgo_search,
-    wikipedia_search,
-    jikan_search,
-    social_media_trending_search,
-    search_articles,        # Executed — real code, /data plane
-    social_media_search,    # Executed — real code, /data plane
+    _recorded(google_news_discovery_run),
+    _recorded(duckduckgo_search),
+    _recorded(wikipedia_search),
+    _recorded(jikan_search),
+    _recorded(social_media_trending_search),
+    _recorded(search_articles),        # Executed — real code, /data plane
+    _recorded(social_media_search),    # Executed — real code, /data plane
 ]
 
 
@@ -357,7 +388,17 @@ def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
             for it in items
         ]
         summary += "\n" + "\n".join(lines)
-    return {"final_response": summary, "metadata": {"item_count": len(items), "items": items}}
+    return {
+        "final_response": summary,
+        "metadata": {
+            "item_count": len(items),
+            "items": items,
+            # Ground truth for which tools the model actually invoked, including
+            # any that raised before reaching the proxy or the /data plane.
+            "tool_invocations": INVOCATIONS,
+            "registered_tools": [getattr(t, "__name__", str(t)) for t in TOOLS],
+        },
+    }
 
 
 if __name__ == "__main__":
