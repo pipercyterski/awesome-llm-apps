@@ -57,9 +57,15 @@ def search_articles(agent: Agent, terms: Union[str, List[str]]) -> str:
 
 
 def execute_simple_search(terms, limit):
+    # COALESCE moved out of the SELECT. The plan grammar rejects it:
+    #   "SELECT DISTINCT includes COALESCE(ca.summary, ca.content) AS content,
+    #    which is an expression — DISTINCT over an expression cannot be
+    #    represented."
+    # Both columns are selected bare and the fallback is applied in Python
+    # below, which produces an identical `content` value per row.
     base_query = """
         SELECT DISTINCT ca.id, ca.title, ca.url, ca.published_date,
-               COALESCE(ca.summary, ca.content) as content,
+               ca.summary, ca.content,
                ca.source_id, ca.feed_id
         FROM crawled_articles ca
         WHERE ca.processed = 1
@@ -79,7 +85,12 @@ def execute_simple_search(terms, limit):
 
     query = base_query + " OR ".join(clauses) + f") ORDER BY ca.published_date DESC LIMIT {int(limit)}"
     result = data_call(TOOL, kind="sql", intent="read", operation=query, client="sqlite")
-    return list(result.get("rows") or [])
+    rows = list(result.get("rows") or [])
+    for row in rows:
+        # The COALESCE the SELECT can no longer carry.
+        row["content"] = row.get("summary") or row.get("content")
+        row.pop("summary", None)
+    return rows
 
 
 def get_article_categories(article_id):

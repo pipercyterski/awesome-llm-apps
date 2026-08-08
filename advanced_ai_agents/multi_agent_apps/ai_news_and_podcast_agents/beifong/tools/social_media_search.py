@@ -37,9 +37,16 @@ def social_media_search(agent: Agent, topic: str, limit: int = 10) -> str:
         date_from = (datetime.now() - timedelta(days=days_back)).isoformat()
         # Ported for Dystopic: declared `executed`, so the query below runs
         # against the run's ledger-backed world via the /data plane instead of
-        # the local social_media_db. The SQL is the customer's, unchanged in
-        # shape — only the transport and the parameter binding differ, because
-        # the plane canonicalizes literals out of the operation text itself.
+        # the local social_media_db.
+        #
+        # Two semantics-preserving translations were needed for the plan grammar:
+        #   * LIKE -> ILIKE. SQLite's LIKE is already case-insensitive for ASCII,
+        #     so this is what the query actually does.
+        #   * datetime(post_timestamp) -> post_timestamp, in both the filter and
+        #     the ORDER BY. The grammar rejects a function expression in ORDER BY
+        #     alongside LIMIT ("dropping the sort would change which rows
+        #     return"). These are ISO-8601 strings, so lexicographic ordering and
+        #     comparison are identical to chronological.
         if True:
             safe_topic = str(topic).replace("'", "''")
             search_term = f"'%{safe_topic}%'"
@@ -55,9 +62,9 @@ def social_media_search(agent: Agent, topic: str, limit: int = 10) -> str:
             WHERE
                 categories ILIKE '%"news"%'
                 AND sentiment = 'positive'
-                AND datetime(post_timestamp) >= datetime('{date_from}')
+                AND post_timestamp >= '{date_from}'
                 AND (post_text ILIKE {search_term} OR user_display_name ILIKE {search_term})
-            ORDER BY datetime(post_timestamp) DESC
+            ORDER BY post_timestamp DESC
             LIMIT {int(limit)}
             """
             result = data_call("social_media_search", kind="sql", intent="read",
