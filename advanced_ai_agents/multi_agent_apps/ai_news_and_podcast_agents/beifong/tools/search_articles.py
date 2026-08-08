@@ -65,10 +65,17 @@ def execute_simple_search(terms, limit):
         WHERE ca.processed = 1
           AND (
     """
+    # ILIKE, not LIKE. The /data plane's plan grammar rejects LIKE outright:
+    #   "The query uses case-sensitive LIKE which cannot be represented;
+    #    only case-insensitive ILIKE is supported."
+    # That reads LIKE with Postgres semantics. In SQLite — which is what beifong
+    # actually runs — LIKE is already case-insensitive for ASCII, so ILIKE is a
+    # semantics-preserving translation of this tool's real behaviour, not a
+    # change to the logic under test.
     clauses = []
     for term in terms:
         like_term = f"'%{_sql_quote(term)}%'"
-        clauses.append(f"(ca.title LIKE {like_term} OR ca.content LIKE {like_term} OR ca.summary LIKE {like_term})")
+        clauses.append(f"(ca.title ILIKE {like_term} OR ca.content ILIKE {like_term} OR ca.summary ILIKE {like_term})")
 
     query = base_query + " OR ".join(clauses) + f") ORDER BY ca.published_date DESC LIMIT {int(limit)}"
     result = data_call(TOOL, kind="sql", intent="read", operation=query, client="sqlite")

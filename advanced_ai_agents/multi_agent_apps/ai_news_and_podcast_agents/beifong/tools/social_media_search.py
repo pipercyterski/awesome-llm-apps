@@ -53,10 +53,10 @@ def social_media_search(agent: Agent, topic: str, limit: int = 10) -> str:
                 platform
             FROM posts
             WHERE
-                categories LIKE '%"news"%'
+                categories ILIKE '%"news"%'
                 AND sentiment = 'positive'
                 AND datetime(post_timestamp) >= datetime('{date_from}')
-                AND (post_text LIKE {search_term} OR user_display_name LIKE {search_term})
+                AND (post_text ILIKE {search_term} OR user_display_name ILIKE {search_term})
             ORDER BY datetime(post_timestamp) DESC
             LIMIT {int(limit)}
             """
@@ -112,7 +112,7 @@ def social_media_trending_search(agent: Agent, limit: int = 10) -> str:
                 platform
             FROM posts
             WHERE 
-                categories LIKE '%"news"%'
+                categories ILIKE '%"news"%'
                 AND sentiment = 'positive'
                 AND datetime(post_timestamp) >= datetime(?)
             ORDER BY 
