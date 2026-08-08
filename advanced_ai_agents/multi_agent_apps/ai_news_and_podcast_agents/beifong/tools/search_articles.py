@@ -87,6 +87,12 @@ def execute_simple_search(terms, limit):
     result = data_call(TOOL, kind="sql", intent="read", operation=query, client="sqlite")
     rows = list(result.get("rows") or [])
     for row in rows:
+        # The /data plane returns an entity's id as `entity_id`, not under the
+        # name the SELECT asked for (`ca.id`). Without this the downstream
+        # `article["id"]` is None and the per-article category lookup queries
+        # `WHERE article_id = 'None'` and silently returns nothing.
+        if "id" not in row and "entity_id" in row:
+            row["id"] = row["entity_id"]
         # The COALESCE the SELECT can no longer carry.
         row["content"] = row.get("summary") or row.get("content")
         row.pop("summary", None)
