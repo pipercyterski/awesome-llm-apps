@@ -287,7 +287,11 @@ def _recorded(fn):
         try:
             out = fn(*args, **kwargs)
             entry["outcome"] = "returned"
-            entry["preview"] = str(out)[:160]
+            # 600, not 160: beifong's own tools catch their exceptions and return
+            # a friendly string, so the underlying platform error class lives in
+            # the tail of the message. A short preview truncates exactly the part
+            # that identifies the failure.
+            entry["preview"] = str(out)[:600]
             return out
         except BaseException as e:
             entry["outcome"] = "raised"
